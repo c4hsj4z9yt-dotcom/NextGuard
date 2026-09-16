@@ -1,36 +1,52 @@
 const {
   Client,
   GatewayIntentBits,
-  Partials,
   PermissionsBitField,
   AuditLogEvent,
   EmbedBuilder,
   SlashCommandBuilder,
   REST,
   Routes,
-  ActivityType
+  ActivityType,
+  ChannelType
 } = require("discord.js");
 
 const config = require("./config.json");
 
+// ==========================================
+// NEXGUARD SECURITY BOT
+// ==========================================
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildModeration
-  ],
-  partials: [Partials.GuildMember]
+    GatewayIntentBits.GuildMembers
+  ]
 });
 
-const actionTracker = new Map();
-const raidTracker = new Map();
+// ==========================================
+// DATA
+// ==========================================
+
 const whitelist = new Map();
 const logChannels = new Map();
 
+const actionTracker = new Map();
+const raidTracker = new Map();
+
+// ==========================================
+// WHITELIST
+// ==========================================
+
 function isWhitelisted(guildId, userId) {
   if (userId === client.user?.id) return true;
+
   return whitelist.get(guildId)?.has(userId) ?? false;
 }
+
+// ==========================================
+// ACTION TRACKER
+// ==========================================
 
 function trackAction(guildId, userId, action, amount, time) {
   const key = `${guildId}:${userId}:${action}`;
@@ -40,87 +56,159 @@ function trackAction(guildId, userId, action, amount, time) {
     .filter(timestamp => now - timestamp < time);
 
   actions.push(now);
+
   actionTracker.set(key, actions);
 
   return actions.length >= amount;
 }
 
+// ==========================================
+// RAID TRACKER
+// ==========================================
+
 function trackRaid(guildId) {
   const now = Date.now();
 
   const joins = (raidTracker.get(guildId) || [])
-    .filter(timestamp => now - timestamp < config.raid.time);
+    .filter(timestamp => {
+      return now - timestamp < config.raid.time;
+    });
 
   joins.push(now);
+
   raidTracker.set(guildId, joins);
 
   return joins.length >= config.raid.amount;
 }
 
-async function sendLog(guild, title, description, color = 0xff0000) {
-  const channelId = logChannels.get(guild.id);
-  if (!channelId) return;
+// ==========================================
+// LOGGING
+// ==========================================
 
-  const channel = guild.channels.cache.get(channelId);
-  if (!channel || !channel.isTextBased()) return;
+async function sendLog(
+  guild,
+  title,
+  description,
+  color = 0xff0000
+) {
+  try {
+    const channelId = logChannels.get(guild.id);
 
-  const embed = new EmbedBuilder()
-    .setColor(color)
-    .setTitle(title)
-    .setDescription(description)
-    .setTimestamp()
-    .setFooter({ text: "NexGuard Security" });
+    if (!channelId) return;
 
-  await channel.send({ embeds: [embed] }).catch(() => {});
+    const channel = guild.channels.cache.get(channelId);
+
+    if (!channel || !channel.isTextBased()) return;
+
+    const embed = new EmbedBuilder()
+      .setColor(color)
+      .setTitle(title)
+      .setDescription(description)
+      .setTimestamp()
+      .setFooter({
+        text: "NexGuard Security"
+      });
+
+    await channel.send({
+      embeds: [embed]
+    });
+
+  } catch (error) {
+    console.error("Log error:", error);
+  }
 }
 
-async function getExecutor(guild, type, targetId) {
+// ==========================================
+// AUDIT LOG
+// ==========================================
+
+async function getExecutor(
+  guild,
+  type,
+  targetId
+) {
   try {
     const logs = await guild.fetchAuditLogs({
       type,
       limit: 5
     });
 
-    const entry = logs.entries.find(entry =>
-      (!targetId || entry.target?.id === targetId) &&
-      Date.now() - entry.createdTimestamp < 10000
-    );
+    const entry = logs.entries.find(entry => {
+
+      const correctTarget =
+        !targetId ||
+        entry.target?.id === targetId;
+
+      const recent =
+        Date.now() - entry.createdTimestamp < 10000;
+
+      return correctTarget && recent;
+    });
 
     return entry?.executor || null;
-  } catch {
+
+  } catch (error) {
+    console.error("Audit log error:", error);
     return null;
   }
 }
 
-async function punish(guild, userId, reason) {
-  const member = await guild.members.fetch(userId).catch(() => null);
-  if (!member) return;
+// ==========================================
+// PUNISH
+// ==========================================
 
-  if (!member.kickable) {
+async function punish(
+  guild,
+  userId,
+  reason
+) {
+  try {
+
+    const member =
+      await guild.members.fetch(userId).catch(() => null);
+
+    if (!member) return;
+
+    if (!member.kickable) {
+
+      await sendLog(
+        guild,
+        "⚠️ NexGuard kon niet ingrijpen",
+        `**${member.user.tag}** kon niet worden verwijderd.\n\n` +
+        `Controleer de rolvolgorde van NexGuard.`,
+        0xffa500
+      );
+
+      return;
+    }
+
+    await member.kick(reason);
+
     await sendLog(
       guild,
-      "⚠️ NexGuard kon niet ingrijpen",
-      `**${member.user.tag}** kon niet worden verwijderd.\nControleer de rolvolgorde van NexGuard.`,
-      0xffa500
+      "🛡️ NexGuard heeft ingegrepen",
+      `**Gebruiker:** ${member.user.tag}\n` +
+      `**Actie:** Kick\n` +
+      `**Reden:** ${reason}`,
+      0x00ff66
     );
-    return;
+
+  } catch (error) {
+    console.error("Punish error:", error);
   }
-
-  await member.kick(reason).catch(() => {});
-
-  await sendLog(
-    guild,
-    "🛡️ NexGuard heeft ingegrepen",
-    `**Gebruiker:** ${member.user.tag}\n**Actie:** Kick\n**Reden:** ${reason}`,
-    0x00ff66
-  );
 }
 
+// ==========================================
+// BOT READY
+// ==========================================
+
 client.once("ready", async () => {
+
   console.log("=================================");
   console.log("        NEXGUARD ONLINE");
   console.log("=================================");
   console.log(`Bot: ${client.user.tag}`);
+  console.log(`Servers: ${client.guilds.cache.size}`);
 
   client.user.setPresence({
     activities: [
@@ -132,361 +220,715 @@ client.once("ready", async () => {
     status: "online"
   });
 
+  // ========================================
+  // SLASH COMMANDS
+  // ========================================
+
   const commands = [
+
     new SlashCommandBuilder()
       .setName("setup")
-      .setDescription("Stel NexGuard in en maak security logs."),
+      .setDescription(
+        "Stel NexGuard Security in."
+      ),
 
     new SlashCommandBuilder()
       .setName("security")
-      .setDescription("Bekijk de NexGuard beveiligingsstatus."),
+      .setDescription(
+        "Bekijk de beveiligingsstatus."
+      ),
 
     new SlashCommandBuilder()
       .setName("whitelist")
-      .setDescription("Voeg een gebruiker toe aan de whitelist.")
+      .setDescription(
+        "Voeg een gebruiker toe aan de whitelist."
+      )
       .addUserOption(option =>
         option
           .setName("user")
-          .setDescription("De gebruiker")
+          .setDescription(
+            "De gebruiker die je wilt whitelisten."
+          )
           .setRequired(true)
       ),
 
     new SlashCommandBuilder()
       .setName("unwhitelist")
-      .setDescription("Verwijder een gebruiker van de whitelist.")
+      .setDescription(
+        "Verwijder een gebruiker van de whitelist."
+      )
       .addUserOption(option =>
         option
           .setName("user")
-          .setDescription("De gebruiker")
+          .setDescription(
+            "De gebruiker."
+          )
           .setRequired(true)
       )
+
   ].map(command => command.toJSON());
 
-  const rest = new REST({
-    version: "10"
-  }).setToken(process.env.DISCORD_TOKEN);
+  // ========================================
+  // REGISTER COMMANDS
+  // ========================================
 
-  await rest.put(
-    Routes.applicationCommands(client.user.id),
-    {
-      body: commands
-    }
-  );
+  try {
 
-  console.log("Slash commands geregistreerd.");
-});
-
-client.on("interactionCreate", async interaction => {
-  if (!interaction.isChatInputCommand()) return;
-  if (!interaction.guild) return;
-
-  if (
-    !interaction.member.permissions.has(
-      PermissionsBitField.Flags.Administrator
-    )
-  ) {
-    return interaction.reply({
-      content: "❌ Je hebt Administrator nodig.",
-      ephemeral: true
-    });
-  }
-
-  const guild = interaction.guild;
-
-  if (interaction.commandName === "setup") {
-    let channel = guild.channels.cache.find(
-      channel =>
-        channel.name === "nexguard-logs" &&
-        channel.isTextBased()
+    const rest = new REST({
+      version: "10"
+    }).setToken(
+      process.env.DISCORD_TOKEN
     );
 
-    if (!channel) {
-      channel = await guild.channels.create({
-        name: "nexguard-logs",
-        reason: "NexGuard security logs"
+    await rest.put(
+      Routes.applicationCommands(
+        client.user.id
+      ),
+      {
+        body: commands
+      }
+    );
+
+    console.log("✅ Slash commands geregistreerd.");
+
+  } catch (error) {
+
+    console.error(
+      "❌ Slash commands konden niet geregistreerd worden:",
+      error
+    );
+  }
+});
+
+// ==========================================
+// INTERACTIONS
+// ==========================================
+
+client.on(
+  "interactionCreate",
+  async interaction => {
+
+    if (!interaction.isChatInputCommand()) {
+      return;
+    }
+
+    if (!interaction.guild) {
+      return interaction.reply({
+        content:
+          "❌ Deze command kan alleen in een server gebruikt worden.",
+        ephemeral: true
       });
     }
 
-    logChannels.set(guild.id, channel.id);
+    try {
 
-    await interaction.reply({
-      content:
-        `✅ **NexGuard is ingesteld!**\n\n` +
-        `📋 Logs: ${channel}\n` +
-        `🛡️ Anti-Nuke: Aan\n` +
-        `🚨 Anti-Raid: Aan\n` +
-        `🤖 Anti-Bot: Aan`,
-      ephemeral: true
-    });
+      // ======================================
+      // ADMIN CHECK
+      // ======================================
 
-    return sendLog(
-      guild,
-      "🛡️ NexGuard geactiveerd",
-      `Ingesteld door **${interaction.user.tag}**.`,
-      0x00ff66
-    );
-  }
+      if (
+        !interaction.member.permissions.has(
+          PermissionsBitField.Flags.Administrator
+        )
+      ) {
 
-  if (interaction.commandName === "security") {
-    return interaction.reply({
-      content:
-        "🛡️ **NexGuard Security**\n\n" +
-        "🟢 Anti-Nuke: Aan\n" +
-        "🟢 Anti-Raid: Aan\n" +
-        "🟢 Anti-Mass Ban/Kick: Aan\n" +
-        "🟢 Anti-Channel Delete: Aan\n" +
-        "🟢 Anti-Role Delete/Create: Aan\n" +
-        "🟢 Anti-Bot: Aan",
-      ephemeral: true
-    });
-  }
+        return interaction.reply({
+          content:
+            "❌ Je hebt **Administrator** nodig om NexGuard te beheren.",
+          ephemeral: true
+        });
+      }
 
-  if (interaction.commandName === "whitelist") {
-    const user = interaction.options.getUser("user");
+      const guild = interaction.guild;
 
-    if (!whitelist.has(guild.id)) {
-      whitelist.set(guild.id, new Set());
+      // ======================================
+      // SETUP
+      // ======================================
+
+      if (
+        interaction.commandName === "setup"
+      ) {
+
+        await interaction.deferReply({
+          ephemeral: true
+        });
+
+        let channel =
+          guild.channels.cache.find(
+            channel =>
+              channel.name === "nexguard-logs" &&
+              channel.isTextBased()
+          );
+
+        // Maak logkanaal
+        if (!channel) {
+
+          channel =
+            await guild.channels.create({
+              name: "nexguard-logs",
+              type: ChannelType.GuildText,
+              reason:
+                "NexGuard security logs"
+            });
+
+        }
+
+        logChannels.set(
+          guild.id,
+          channel.id
+        );
+
+        await interaction.editReply({
+          content:
+            "✅ **NexGuard is succesvol ingesteld!**\n\n" +
+            `📋 Logs: ${channel}\n` +
+            "🛡️ Anti-Nuke: 🟢 Aan\n" +
+            "🚨 Anti-Raid: 🟢 Aan\n" +
+            "🤖 Anti-Bot: 🟢 Aan\n" +
+            "🔨 Anti-Mass Ban/Kick: 🟢 Aan"
+        });
+
+        await sendLog(
+          guild,
+          "🛡️ NexGuard geactiveerd",
+          `NexGuard is ingesteld door **${interaction.user.tag}**.`,
+          0x00ff66
+        );
+
+        return;
+      }
+
+      // ======================================
+      // SECURITY
+      // ======================================
+
+      if (
+        interaction.commandName === "security"
+      ) {
+
+        return interaction.reply({
+
+          content:
+            "🛡️ **NEXGUARD SECURITY STATUS**\n\n" +
+
+            "🟢 Anti-Nuke\n" +
+            "🟢 Anti-Raid\n" +
+            "🟢 Anti-Mass Ban\n" +
+            "🟢 Anti-Mass Kick\n" +
+            "🟢 Anti-Channel Delete\n" +
+            "🟢 Anti-Role Delete\n" +
+            "🟢 Anti-Role Create\n" +
+            "🟢 Anti-Bot\n" +
+            "🟢 Security Logs",
+
+          ephemeral: true
+        });
+      }
+
+      // ======================================
+      // WHITELIST
+      // ======================================
+
+      if (
+        interaction.commandName === "whitelist"
+      ) {
+
+        const user =
+          interaction.options.getUser("user");
+
+        if (!whitelist.has(guild.id)) {
+
+          whitelist.set(
+            guild.id,
+            new Set()
+          );
+
+        }
+
+        whitelist
+          .get(guild.id)
+          .add(user.id);
+
+        return interaction.reply({
+          content:
+            `✅ **${user.tag}** staat nu op de NexGuard whitelist.`,
+          ephemeral: true
+        });
+      }
+
+      // ======================================
+      // UNWHITELIST
+      // ======================================
+
+      if (
+        interaction.commandName === "unwhitelist"
+      ) {
+
+        const user =
+          interaction.options.getUser("user");
+
+        whitelist
+          .get(guild.id)
+          ?.delete(user.id);
+
+        return interaction.reply({
+          content:
+            `✅ **${user.tag}** is van de NexGuard whitelist verwijderd.`,
+          ephemeral: true
+        });
+      }
+
+    } catch (error) {
+
+      console.error(
+        "❌ Interaction error:",
+        error
+      );
+
+      if (
+        interaction.replied ||
+        interaction.deferred
+      ) {
+
+        await interaction.editReply({
+          content:
+            "❌ Er ging iets fout bij het uitvoeren van deze command. Controleer de bot-console."
+        }).catch(() => {});
+
+      } else {
+
+        await interaction.reply({
+          content:
+            "❌ Er ging iets fout bij NexGuard.",
+          ephemeral: true
+        }).catch(() => {});
+
+      }
     }
-
-    whitelist.get(guild.id).add(user.id);
-
-    return interaction.reply({
-      content: `✅ **${user.tag}** staat nu op de whitelist.`,
-      ephemeral: true
-    });
   }
+);
 
-  if (interaction.commandName === "unwhitelist") {
-    const user = interaction.options.getUser("user");
+// ==========================================
+// ANTI-BOT
+// ==========================================
 
-    whitelist.get(guild.id)?.delete(user.id);
+client.on(
+  "guildMemberAdd",
+  async member => {
 
-    return interaction.reply({
-      content: `✅ **${user.tag}** is van de whitelist verwijderd.`,
-      ephemeral: true
-    });
-  }
-});
+    try {
 
-client.on("guildMemberAdd", async member => {
-  if (config.antiBot && member.user.bot) {
-    await sendLog(
-      member.guild,
-      "🤖 Nieuwe bot gedetecteerd",
-      `**${member.user.tag}** is automatisch gecontroleerd.`,
-      0xffa500
-    );
+      if (
+        config.antiBot &&
+        member.user.bot
+      ) {
 
-    if (member.kickable) {
-      await member.kick("NexGuard Anti-Bot").catch(() => {});
+        await sendLog(
+          member.guild,
+          "🤖 Nieuwe bot gedetecteerd",
+          `**${member.user.tag}** is toegetreden en wordt gecontroleerd.`,
+          0xffa500
+        );
+
+        if (member.kickable) {
+
+          await member.kick(
+            "NexGuard Anti-Bot"
+          );
+
+        }
+
+        return;
+      }
+
+      // ====================================
+      // ANTI-RAID
+      // ====================================
+
+      if (
+        config.antiRaid &&
+        trackRaid(member.guild.id)
+      ) {
+
+        await sendLog(
+          member.guild,
+          "🚨 MOGELIJKE RAID GEDETECTEERD",
+          "Er zijn in korte tijd veel leden toegetreden.",
+          0xff0000
+        );
+      }
+
+    } catch (error) {
+
+      console.error(
+        "GuildMemberAdd error:",
+        error
+      );
     }
-
-    return;
   }
+);
 
-  if (config.antiRaid && trackRaid(member.guild.id)) {
-    await sendLog(
-      member.guild,
-      "🚨 MOGELIJKE RAID GEDETECTEERD",
-      "Er zijn in korte tijd veel leden gejoined.",
-      0xff0000
+// ==========================================
+// ANTI-MASS BAN
+// ==========================================
+
+client.on(
+  "guildBanAdd",
+  async ban => {
+
+    try {
+
+      const guild = ban.guild;
+
+      const executor =
+        await getExecutor(
+          guild,
+          AuditLogEvent.MemberBanAdd,
+          ban.user.id
+        );
+
+      if (!executor) return;
+
+      if (
+        isWhitelisted(
+          guild.id,
+          executor.id
+        )
+      ) return;
+
+      if (
+        trackAction(
+          guild.id,
+          executor.id,
+          "ban",
+          config.limits.ban.amount,
+          config.limits.ban.time
+        )
+      ) {
+
+        await sendLog(
+          guild,
+          "🚨 ANTI-NUKE ACTIE",
+          `**${executor.tag}** heeft te veel bans uitgevoerd.`,
+          0xff0000
+        );
+
+        await punish(
+          guild,
+          executor.id,
+          "NexGuard Anti-Mass-Ban"
+        );
+      }
+
+    } catch (error) {
+
+      console.error(
+        "Ban protection error:",
+        error
+      );
+    }
+  }
+);
+
+// ==========================================
+// ANTI-MASS KICK
+// ==========================================
+
+client.on(
+  "guildMemberRemove",
+  async member => {
+
+    try {
+
+      const guild = member.guild;
+
+      const executor =
+        await getExecutor(
+          guild,
+          AuditLogEvent.MemberKick,
+          member.id
+        );
+
+      if (!executor) return;
+
+      if (
+        isWhitelisted(
+          guild.id,
+          executor.id
+        )
+      ) return;
+
+      if (
+        trackAction(
+          guild.id,
+          executor.id,
+          "kick",
+          config.limits.kick.amount,
+          config.limits.kick.time
+        )
+      ) {
+
+        await sendLog(
+          guild,
+          "🚨 ANTI-NUKE ACTIE",
+          `**${executor.tag}** heeft te veel kicks uitgevoerd.`,
+          0xff0000
+        );
+
+        await punish(
+          guild,
+          executor.id,
+          "NexGuard Anti-Mass-Kick"
+        );
+      }
+
+    } catch (error) {
+
+      console.error(
+        "Kick protection error:",
+        error
+      );
+    }
+  }
+);
+
+// ==========================================
+// ANTI CHANNEL DELETE
+// ==========================================
+
+client.on(
+  "channelDelete",
+  async channel => {
+
+    try {
+
+      const guild = channel.guild;
+
+      const executor =
+        await getExecutor(
+          guild,
+          AuditLogEvent.ChannelDelete,
+          channel.id
+        );
+
+      if (!executor) return;
+
+      if (
+        isWhitelisted(
+          guild.id,
+          executor.id
+        )
+      ) return;
+
+      if (
+        trackAction(
+          guild.id,
+          executor.id,
+          "channelDelete",
+          config.limits.channelDelete.amount,
+          config.limits.channelDelete.time
+        )
+      ) {
+
+        await sendLog(
+          guild,
+          "🚨 ANTI-NUKE ACTIE",
+          `**${executor.tag}** verwijderde te veel kanalen.`,
+          0xff0000
+        );
+
+        await punish(
+          guild,
+          executor.id,
+          "NexGuard Anti-Mass-Channel-Delete"
+        );
+      }
+
+    } catch (error) {
+
+      console.error(
+        "Channel delete protection error:",
+        error
+      );
+    }
+  }
+);
+
+// ==========================================
+// ANTI ROLE DELETE
+// ==========================================
+
+client.on(
+  "roleDelete",
+  async role => {
+
+    try {
+
+      const guild = role.guild;
+
+      const executor =
+        await getExecutor(
+          guild,
+          AuditLogEvent.RoleDelete,
+          role.id
+        );
+
+      if (!executor) return;
+
+      if (
+        isWhitelisted(
+          guild.id,
+          executor.id
+        )
+      ) return;
+
+      if (
+        trackAction(
+          guild.id,
+          executor.id,
+          "roleDelete",
+          config.limits.roleDelete.amount,
+          config.limits.roleDelete.time
+        )
+      ) {
+
+        await sendLog(
+          guild,
+          "🚨 ANTI-NUKE ACTIE",
+          `**${executor.tag}** verwijderde te veel rollen.`,
+          0xff0000
+        );
+
+        await punish(
+          guild,
+          executor.id,
+          "NexGuard Anti-Mass-Role-Delete"
+        );
+      }
+
+    } catch (error) {
+
+      console.error(
+        "Role delete protection error:",
+        error
+      );
+    }
+  }
+);
+
+// ==========================================
+// ANTI ROLE CREATE
+// ==========================================
+
+client.on(
+  "roleCreate",
+  async role => {
+
+    try {
+
+      const guild = role.guild;
+
+      const executor =
+        await getExecutor(
+          guild,
+          AuditLogEvent.RoleCreate,
+          role.id
+        );
+
+      if (!executor) return;
+
+      if (
+        isWhitelisted(
+          guild.id,
+          executor.id
+        )
+      ) return;
+
+      if (
+        trackAction(
+          guild.id,
+          executor.id,
+          "roleCreate",
+          config.limits.roleCreate.amount,
+          config.limits.roleCreate.time
+        )
+      ) {
+
+        await sendLog(
+          guild,
+          "🚨 ANTI-NUKE ACTIE",
+          `**${executor.tag}** maakte te veel rollen aan.`,
+          0xff0000
+        );
+
+        await punish(
+          guild,
+          executor.id,
+          "NexGuard Anti-Mass-Role-Create"
+        );
+      }
+
+    } catch (error) {
+
+      console.error(
+        "Role create protection error:",
+        error
+      );
+    }
+  }
+);
+
+// ==========================================
+// ERRORS
+// ==========================================
+
+process.on(
+  "unhandledRejection",
+  error => {
+    console.error(
+      "Unhandled rejection:",
+      error
     );
   }
-});
+);
 
-client.on("guildBanAdd", async ban => {
-  const guild = ban.guild;
-
-  const executor = await getExecutor(
-    guild,
-    AuditLogEvent.MemberBanAdd,
-    ban.user.id
-  );
-
-  if (!executor) return;
-  if (isWhitelisted(guild.id, executor.id)) return;
-
-  if (
-    trackAction(
-      guild.id,
-      executor.id,
-      "ban",
-      config.limits.ban.amount,
-      config.limits.ban.time
-    )
-  ) {
-    await sendLog(
-      guild,
-      "🚨 ANTI-NUKE ACTIE",
-      `**${executor.tag}** heeft te veel bans uitgevoerd.`,
-      0xff0000
-    );
-
-    await punish(
-      guild,
-      executor.id,
-      "NexGuard Anti-Mass-Ban"
+process.on(
+  "uncaughtException",
+  error => {
+    console.error(
+      "Uncaught exception:",
+      error
     );
   }
-});
+);
 
-client.on("guildMemberRemove", async member => {
-  const guild = member.guild;
-
-  const executor = await getExecutor(
-    guild,
-    AuditLogEvent.MemberKick,
-    member.id
-  );
-
-  if (!executor) return;
-  if (isWhitelisted(guild.id, executor.id)) return;
-
-  if (
-    trackAction(
-      guild.id,
-      executor.id,
-      "kick",
-      config.limits.kick.amount,
-      config.limits.kick.time
-    )
-  ) {
-    await sendLog(
-      guild,
-      "🚨 ANTI-NUKE ACTIE",
-      `**${executor.tag}** heeft te veel kicks uitgevoerd.`,
-      0xff0000
-    );
-
-    await punish(
-      guild,
-      executor.id,
-      "NexGuard Anti-Mass-Kick"
+client.on(
+  "error",
+  error => {
+    console.error(
+      "Discord client error:",
+      error
     );
   }
-});
+);
 
-client.on("channelDelete", async channel => {
-  if (!channel.guild) return;
-
-  const guild = channel.guild;
-
-  const executor = await getExecutor(
-    guild,
-    AuditLogEvent.ChannelDelete,
-    channel.id
-  );
-
-  if (!executor) return;
-  if (isWhitelisted(guild.id, executor.id)) return;
-
-  if (
-    trackAction(
-      guild.id,
-      executor.id,
-      "channelDelete",
-      config.limits.channelDelete.amount,
-      config.limits.channelDelete.time
-    )
-  ) {
-    await sendLog(
-      guild,
-      "🚨 ANTI-NUKE ACTIE",
-      `**${executor.tag}** verwijderde te veel kanalen.`,
-      0xff0000
-    );
-
-    await punish(
-      guild,
-      executor.id,
-      "NexGuard Anti-Mass-Channel-Delete"
-    );
-  }
-});
-
-client.on("roleDelete", async role => {
-  const guild = role.guild;
-
-  const executor = await getExecutor(
-    guild,
-    AuditLogEvent.RoleDelete,
-    role.id
-  );
-
-  if (!executor) return;
-  if (isWhitelisted(guild.id, executor.id)) return;
-
-  if (
-    trackAction(
-      guild.id,
-      executor.id,
-      "roleDelete",
-      config.limits.roleDelete.amount,
-      config.limits.roleDelete.time
-    )
-  ) {
-    await sendLog(
-      guild,
-      "🚨 ANTI-NUKE ACTIE",
-      `**${executor.tag}** verwijderde te veel rollen.`,
-      0xff0000
-    );
-
-    await punish(
-      guild,
-      executor.id,
-      "NexGuard Anti-Mass-Role-Delete"
-    );
-  }
-});
-
-client.on("roleCreate", async role => {
-  const guild = role.guild;
-
-  const executor = await getExecutor(
-    guild,
-    AuditLogEvent.RoleCreate,
-    role.id
-  );
-
-  if (!executor) return;
-  if (isWhitelisted(guild.id, executor.id)) return;
-
-  if (
-    trackAction(
-      guild.id,
-      executor.id,
-      "roleCreate",
-      config.limits.roleCreate.amount,
-      config.limits.roleCreate.time
-    )
-  ) {
-    await sendLog(
-      guild,
-      "🚨 ANTI-NUKE ACTIE",
-      `**${executor.tag}** maakte te veel rollen aan.`,
-      0xff0000
-    );
-
-    await punish(
-      guild,
-      executor.id,
-      "NexGuard Anti-Mass-Role-Create"
-    );
-  }
-});
-
-process.on("unhandledRejection", error => {
-  console.error("Unhandled rejection:", error);
-});
-
-process.on("uncaughtException", error => {
-  console.error("Uncaught exception:", error);
-});
+// ==========================================
+// TOKEN
+// ==========================================
 
 if (!process.env.DISCORD_TOKEN) {
-  console.error("❌ DISCORD_TOKEN ontbreekt!");
+
+  console.error(
+    "❌ DISCORD_TOKEN ontbreekt!"
+  );
+
   process.exit(1);
 }
 
-client.login(process.env.DISCORD_TOKEN);
+// ==========================================
+// LOGIN
+// ==========================================
+
+client.login(
+  process.env.DISCORD_TOKEN
+);
