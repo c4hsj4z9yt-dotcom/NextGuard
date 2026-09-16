@@ -924,6 +924,25 @@ if (!process.env.DISCORD_TOKEN) {
 
   process.exit(1);
 }
+client.on("interactionCreate", async interaction => {
+  console.log("INTERACTION:", interaction.commandName);
+
+  if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName === "security") {
+    try {
+      await interaction.reply({
+        content: "🛡️ NexGuard werkt!",
+        ephemeral: true
+      });
+
+      console.log("SECURITY COMMAND WERKT!");
+
+    } catch (error) {
+      console.error("SECURITY ERROR:", error);
+    }
+  }
+});
 
 // ==========================================
 // LOGIN
